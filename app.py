@@ -50,7 +50,7 @@ CONFIG = {
     'leaderboard_check_interval': 1800,
     'safety_margin': 250,
     'competition_strategy': 'today_only',
-    'my_user_id': '4242',
+    'my_user_id': '4150',
     'browser_url': "https://adsha.re/surf",
     'login_url': "https://adsha.re/login",  # Added login URL
     'leaderboard_url': 'https://adsha.re/ten',
@@ -58,6 +58,7 @@ CONFIG = {
     'profile_dir': '/app/firefox_profile',
     'extensions_dir': '/app/extensions',
     'auto_start': True,
+    'manual_target': None,  # Added manual target
 }
 
 EXTENSIONS = {
@@ -102,6 +103,7 @@ class MonitorState:
         self.credits_growth_rate = 0
         self.last_check_time = None
         self.profile_initialized = False
+        self.manual_target = None  # Added manual target
 
 state = MonitorState()
 
@@ -409,6 +411,10 @@ def fetch_leaderboard() -> Optional[List[Dict]]:
         return None
 
 def calculate_target(leaderboard: List[Dict]) -> Tuple[int, str]:
+    # CHECK MANUAL TARGET FIRST - OVERRIDES ALL AUTOMATIC CALCULATIONS
+    if state.manual_target is not None:
+        return state.manual_target, f"MANUAL TARGET: {state.manual_target}"
+    
     if len(leaderboard) < 2:
         return 0, "Not enough data"
     
@@ -426,9 +432,6 @@ def get_my_value(my_data: Dict) -> int:
     return my_data['today_credits']
 
 def should_stop_browser(leaderboard: List[Dict]) -> bool:
-    if state.my_position != 1:
-        return False
-    
     my_data = None
     for entry in leaderboard:
         if entry['user_id'] == CONFIG['my_user_id']:
@@ -438,6 +441,15 @@ def should_stop_browser(leaderboard: List[Dict]) -> bool:
         return False
     
     my_today = get_my_value(my_data)
+    
+    # CHECK MANUAL TARGET FIRST
+    if state.manual_target is not None:
+        return my_today >= state.manual_target
+    
+    # Original logic for rank-based target
+    if state.my_position != 1:
+        return False
+    
     target, _ = calculate_target(leaderboard)
     return my_today >= target
 
@@ -498,7 +510,13 @@ def check_competition_status():
     state.current_target = target
     
     status_message = ""
-    if state.my_position != 1:
+    if state.manual_target is not None:
+        if my_value >= state.manual_target:
+            status_message = f"✅ MANUAL TARGET ACHIEVED! ({state.manual_target})"
+        else:
+            gap = state.manual_target - my_value
+            status_message = f"🎯 CHASING MANUAL TARGET - Need {gap} more credits"
+    elif state.my_position != 1:
         first_place = leaderboard[0]
         gap = first_place['today_credits'] - my_value
         status_message = f"📉 Currently #{state.my_position}, chasing #1 (gap: {gap})"
@@ -556,10 +574,12 @@ def telegram_bot_loop():
                                     check_competition_status()
                                 elif command == '/strategy_today':
                                     state.strategy = 'today_only'
+                                    state.manual_target = None  # Clear manual target when switching strategy
                                     send_telegram_message("🎯 Strategy: TODAY ONLY")
                                     check_competition_status()
                                 elif command == '/strategy_combined':
                                     state.strategy = 'combined'
+                                    state.manual_target = None  # Clear manual target when switching strategy
                                     send_telegram_message("🎯 Strategy: COMBINED")
                                     check_competition_status()
                                 elif command.startswith('/margin '):
@@ -569,6 +589,18 @@ def telegram_bot_loop():
                                         check_competition_status()
                                     except:
                                         send_telegram_message("❌ Usage: /margin <number>")
+                                elif command.startswith('/target '):
+                                    try:
+                                        target_value = int(command.split()[1])
+                                        state.manual_target = target_value
+                                        send_telegram_message(f"🎯 MANUAL TARGET SET: {target_value}\n\nNow ignoring competitors and focusing only on reaching {target_value} credits today!")
+                                        check_competition_status()
+                                    except:
+                                        send_telegram_message("❌ Usage: /target <number>")
+                                elif command == '/target_clear':
+                                    state.manual_target = None
+                                    send_telegram_message("🔄 Manual target cleared! Returning to automatic competition mode.")
+                                    check_competition_status()
                                 elif command == '/help':
                                     help_text = """
 🤖 <b>AdShare Monitor (Low Resource)</b>
@@ -579,6 +611,8 @@ def telegram_bot_loop():
 /strategy_today - Today only strategy
 /strategy_combined - Combined strategy
 /margin <number> - Set safety margin
+/target <number> - Set manual target (overrides auto)
+/target_clear - Clear manual target
 /help - This help
 
 💡 <i>Running in low resource mode</i>
