@@ -18,4 +18,5 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN mkdir -p /app/firefox_profile /app/extensions
-CMD ["python", "app.py"].
+
+CMD ["python", "app.py"]
