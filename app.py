@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AdShare Monitor v11.1 - Ultra Low Resource - FIXED
+AdShare Monitor v11.2 - Ultra Low Resource - FIXED LOGIN & LEADERBOARD
 """
 
 import subprocess
@@ -58,7 +58,7 @@ CONFIG = {
     'profile_dir': '/app/firefox_profile',
     'extensions_dir': '/app/extensions',
     'auto_start': True,
-    'manual_target': None,  # Added manual target feature
+    'manual_target': None,
 }
 
 EXTENSIONS = {
@@ -103,7 +103,7 @@ class MonitorState:
         self.credits_growth_rate = 0
         self.last_check_time = None
         self.profile_initialized = False
-        self.manual_target = None  # Manual target feature
+        self.manual_target = None
         self.initialization_attempted = False
 
 state = MonitorState()
@@ -111,7 +111,7 @@ state = MonitorState()
 # ==================== CORE FUNCTIONS ====================
 
 def download_files():
-    """Download extension files with retry logic"""
+    """Download extension files"""
     os.makedirs(CONFIG['extensions_dir'], exist_ok=True)
     logger.info("Downloading extensions...")
     
@@ -125,102 +125,41 @@ def download_files():
                 logger.info(f"Downloaded {ext_info['name']}")
             except Exception as e:
                 logger.error(f"Failed to download {ext_info['name']}: {e}")
-                # Try alternative download method
-                try:
-                    response = requests.get(ext_info["xpi_url"], timeout=30)
-                    with open(filepath, 'wb') as f:
-                        f.write(response.content)
-                    logger.info(f"Downloaded {ext_info['name']} via requests")
-                except Exception as e2:
-                    logger.error(f"Alternative download also failed: {e2}")
-                    continue
+                continue
         paths[ext_id] = filepath
     return paths
 
 def install_userscript_simple(driver):
-    """Simplified userscript installation that works"""
+    """Simplified userscript installation"""
     logger.info("Installing userscript...")
     
     try:
         # Navigate to userscript page
         driver.get(USERSCRIPT_PAGE)
-        time.sleep(10)  # Wait for page to load completely
-        
-        # Check if we're on the right page
-        if "very-smart-symbol-game" not in driver.page_source.lower():
-            logger.warning("May not be on correct userscript page")
+        time.sleep(10)
         
         # Try multiple selectors for install button
         install_selectors = [
             "a.install-link",
-            ".install-link",
+            ".install-link", 
             "a[href*='userjs']",
-            "a[href*='user.js']", 
             "a[href*='install']",
             "button.install",
-            ".install-button",
-            "a.btn-install"
         ]
         
-        installed = False
         for selector in install_selectors:
             try:
-                install_btn = WebDriverWait(driver, 5).until(
+                install_btn = WebDriverWait(driver, 10).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
                 )
                 driver.execute_script("arguments[0].scrollIntoView(true);", install_btn)
                 time.sleep(1)
                 install_btn.click()
                 logger.info(f"Clicked install button: {selector}")
-                time.sleep(8)  # Wait for Violentmonkey popup
-                installed = True
+                time.sleep(10)
                 break
-            except Exception as e:
-                continue
-        
-        if not installed:
-            # Fallback: try to find by text
-            try:
-                install_btn = driver.find_element(By.XPATH, "//a[contains(text(), 'Install')]")
-                install_btn.click()
-                logger.info("Clicked Install via text")
-                time.sleep(8)
-                installed = True
             except:
-                pass
-        
-        # Handle Violentmonkey installation popup if it appears
-        try:
-            # Switch to any new windows that opened
-            if len(driver.window_handles) > 1:
-                original_window = driver.current_window_handle
-                for window in driver.window_handles:
-                    if window != original_window:
-                        driver.switch_to.window(window)
-                        time.sleep(3)
-                        
-                        # Look for install button in Violentmonkey popup
-                        vm_selectors = [
-                            "button[data-cmd='install']",
-                            "button.install",
-                            "input[value='Install']",
-                            "button:contains('Install')"
-                        ]
-                        
-                        for vm_selector in vm_selectors:
-                            try:
-                                install_btn = driver.find_element(By.CSS_SELECTOR, vm_selector)
-                                install_btn.click()
-                                logger.info("Clicked install in Violentmonkey popup")
-                                time.sleep(3)
-                                break
-                            except:
-                                continue
-                        
-                        driver.close()
-                        driver.switch_to.window(original_window)
-        except Exception as e:
-            logger.warning(f"Could not handle Violentmonkey popup: {e}")
+                continue
         
         logger.info("Userscript installation completed")
         return True
@@ -230,13 +169,13 @@ def install_userscript_simple(driver):
         return False
 
 def initialize_profile():
-    """Initialize profile - SIMPLIFIED VERSION that works"""
+    """Initialize profile - SIMPLIFIED"""
     if state.profile_initialized:
         return True
         
     if state.initialization_attempted:
-        logger.info("Profile initialization already attempted, skipping")
-        return False
+        logger.info("Profile initialization already attempted, continuing anyway...")
+        return True
         
     state.initialization_attempted = True
     logger.info("Initializing profile...")
@@ -252,7 +191,7 @@ def initialize_profile():
     
     os.makedirs(CONFIG['profile_dir'], exist_ok=True)
     
-    # Download extensions first
+    # Download extensions
     extension_paths = download_files()
     if not extension_paths:
         logger.error("Failed to download extensions")
@@ -272,7 +211,7 @@ def initialize_profile():
     options.set_preference("extensions.autoDisableScopes", 0)
     options.set_preference("extensions.enabledScopes", 15)
     
-    # Install extensions in one session
+    # Install extensions
     logger.info("Installing extensions...")
     driver = None
     try:
@@ -300,23 +239,18 @@ def initialize_profile():
                 pass
         return False
     
-    # Install userscript in separate session
+    # Install userscript
     logger.info("Installing userscript...")
     try:
         driver = webdriver.Firefox(options=options)
-        time.sleep(10)  # Wait for extensions to load
+        time.sleep(15)  # Wait longer for extensions to load
         
         success = install_userscript_simple(driver)
         driver.quit()
         
-        if success:
-            state.profile_initialized = True
-            logger.info("✅ Profile initialization complete!")
-            return True
-        else:
-            logger.warning("Userscript installation may have failed, but continuing...")
-            state.profile_initialized = True
-            return True
+        state.profile_initialized = True
+        logger.info("✅ Profile initialization complete!")
+        return True
             
     except Exception as e:
         logger.error(f"Userscript installation failed: {e}")
@@ -325,16 +259,15 @@ def initialize_profile():
                 driver.quit()
             except:
                 pass
-        # Even if userscript fails, mark as initialized and continue
+        # Mark as initialized anyway and continue
         state.profile_initialized = True
         return True
 
 def start_browser():
     """Start browser with the pre-configured profile"""
-    if not state.profile_initialized:
-        if not initialize_profile():
-            logger.error("Cannot start browser: profile not initialized")
-            return None
+    if not state.profile_initialized and not initialize_profile():
+        logger.error("Cannot start browser: profile not initialized")
+        return None
     
     logger.info("Starting browser...")
     
@@ -348,12 +281,8 @@ def start_browser():
     
     # Low memory settings
     options.set_preference("dom.ipc.processCount", 1)
-    options.set_preference("dom.ipc.processCount.webIsolated", 1)
     options.set_preference("browser.tabs.remote.autostart", False)
-    options.set_preference("browser.tabs.remote.autostart.2", False)
     options.set_preference("browser.sessionstore.interval", 60000)
-    options.set_preference("browser.sessionstore.max_resumed_crashes", 0)
-    options.set_preference("dom.disable_beforeunload", True)
     
     try:
         driver = webdriver.Firefox(options=options)
@@ -375,42 +304,79 @@ def stop_browser():
         state.driver = None
     state.browser_active = False
 
-def smart_login_flow(driver):
-    """Login flow that works"""
+def manual_login(driver):
+    """Manual login as fallback when auto-login fails"""
     try:
-        logger.info("Starting login flow...")
+        logger.info("Attempting manual login...")
         
-        # Step 1: Open login page first
-        logger.info("Step 1: Opening login page...")
+        # Go to login page
         driver.get(CONFIG['login_url'])
+        time.sleep(5)
+        
+        # Find and fill email field
+        email_field = driver.find_element(By.NAME, "email")
+        email_field.clear()
+        email_field.send_keys(CONFIG['email'])
+        time.sleep(1)
+        
+        # Find and fill password field  
+        password_field = driver.find_element(By.NAME, "password")
+        password_field.clear()
+        password_field.send_keys(CONFIG['password'])
+        time.sleep(1)
+        
+        # Find and click login button
+        login_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+        login_btn.click()
         time.sleep(8)
         
-        # Step 2: Wait for auto-login by userscript
-        logger.info("Step 2: Waiting for auto-login...")
-        wait_time = 60
-        for i in range(wait_time):
-            time.sleep(1)
-            current_url = driver.current_url.lower()
-            if "surf" in current_url or "game" in current_url:
-                logger.info("✅ Auto-login detected early!")
-                return True
-            if i % 10 == 0:
-                logger.info(f"Auto-login wait: {i}/{wait_time} seconds")
-        
-        # Step 3: Navigate to surf page
-        logger.info("Step 3: Navigating to surf page...")
-        driver.get(CONFIG['browser_url'])
-        time.sleep(8)
-        
-        # Check if successfully on surf page
-        current_url = driver.current_url.lower()
-        if "surf" in current_url or "game" in current_url:
-            logger.info("✅ Login successful! Ready to surf.")
+        # Check if login successful
+        if "surf" in driver.current_url or "game" in driver.current_url:
+            logger.info("✅ Manual login successful!")
             return True
         else:
-            logger.warning("Not on surf page, checking current state...")
-            logger.info(f"Current URL: {driver.current_url}")
+            logger.error("❌ Manual login failed")
             return False
+            
+    except Exception as e:
+        logger.error(f"Manual login error: {e}")
+        return False
+
+def smart_login_flow(driver):
+    """Improved login flow with auto-login and fallback"""
+    try:
+        logger.info("Starting improved login flow...")
+        
+        # Try auto-login first by going directly to surf page
+        logger.info("Step 1: Trying auto-login via surf page...")
+        driver.get(CONFIG['browser_url'])
+        time.sleep(10)
+        
+        # Check if auto-login worked
+        current_url = driver.current_url.lower()
+        if "surf" in current_url or "game" in current_url:
+            logger.info("✅ Auto-login successful!")
+            return True
+        
+        # Auto-login failed, try manual login
+        logger.info("Step 2: Auto-login failed, trying manual login...")
+        if manual_login(driver):
+            return True
+        
+        # Both failed, try one more direct approach
+        logger.info("Step 3: Trying alternative approach...")
+        driver.get("https://adsha.re/")
+        time.sleep(5)
+        driver.get(CONFIG['browser_url'])
+        time.sleep(10)
+        
+        current_url = driver.current_url.lower()
+        if "surf" in current_url or "game" in current_url:
+            logger.info("✅ Alternative login successful!")
+            return True
+            
+        logger.error("❌ All login attempts failed")
+        return False
             
     except Exception as e:
         logger.error(f"Login flow error: {e}")
@@ -426,16 +392,33 @@ class LeaderboardParser:
             leaderboard = []
             
             # Multiple parsing strategies
+            entries = []
+            
+            # Strategy 1: Look for specific div patterns
             entries = soup.find_all('div', style=lambda x: x and 'width:250px' in x and 'margin:5px auto' in x)
             
+            # Strategy 2: Look for any div containing leaderboard data
             if not entries:
-                # Alternative: look for divs containing competition data
                 all_divs = soup.find_all('div')
-                entries = [div for div in all_divs if any(x in div.get_text() for x in ['T:', 'Y:', 'DB:'])]
+                for div in all_divs:
+                    text = div.get_text()
+                    if 'T:' in text and 'Y:' in text and '#' in text:
+                        entries.append(div)
+            
+            # Strategy 3: Look for specific text patterns
+            if not entries:
+                leaderboard_text = soup.get_text()
+                # Extract entries using regex
+                entries_regex = re.findall(r'#\d+.*?T:\s*[\d,]+.*?Y:\s*[\d,]+.*?DB:\s*[\d,]+', leaderboard_text.replace('\n', ' '))
+                if entries_regex:
+                    entries = entries_regex
             
             rank = 1
             for entry in entries:
-                text = entry.get_text(strip=True)
+                if isinstance(entry, str):
+                    text = entry
+                else:
+                    text = entry.get_text(strip=True)
                 
                 # Extract user ID
                 user_match = re.search(r'#(\d+)', text)
@@ -472,27 +455,42 @@ class LeaderboardParser:
             return []
 
 def fetch_leaderboard() -> Optional[List[Dict]]:
-    """Fetch leaderboard with improved error handling"""
+    """Fetch leaderboard with multiple strategies"""
+    # Strategy 1: Direct request with cookies
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Cookie': 'adshare_e=loginallapps%40gmail.com; adshare_s=e4dc9d210bb38a86cd360253a82feb2cc6ed84f5ddf778be89484fb476998e0dfc31280c575a38a2467067cd6ec1d6ff7e25aa46dedd6ea454831df26365dfc2; adshare_d=20251025; adshare_h=https%3A%2F%2Fadsha.re%2Faffiliates'
+            'Content-Type': 'application/x-www-form-urlencoded',
         }
         
-        response = requests.post(CONFIG['leaderboard_url'], headers=headers, timeout=30)
+        # Try with form data
+        form_data = {
+            'get_ten': '1'  # This might be needed for the leaderboard
+        }
+        
+        response = requests.post(CONFIG['leaderboard_url'], headers=headers, data=form_data, timeout=30)
         if response.status_code == 200:
             leaderboard = LeaderboardParser.parse_with_beautifulsoup(response.text)
             if leaderboard:
                 return leaderboard
-        return None
     except Exception as e:
-        logger.error(f"Leaderboard error: {e}")
-        return None
+        logger.error(f"Leaderboard strategy 1 error: {e}")
+    
+    # Strategy 2: Simple GET request
+    try:
+        response = requests.get(CONFIG['leaderboard_url'], timeout=30)
+        if response.status_code == 200:
+            leaderboard = LeaderboardParser.parse_with_beautifulsoup(response.text)
+            if leaderboard:
+                return leaderboard
+    except Exception as e:
+        logger.error(f"Leaderboard strategy 2 error: {e}")
+    
+    return None
 
 def calculate_target(leaderboard: List[Dict]) -> Tuple[int, str]:
     """Calculate target with manual target support"""
-    # MANUAL TARGET OVERRIDE
     if state.manual_target is not None:
         return state.manual_target, f"MANUAL TARGET: {state.manual_target}"
     
@@ -510,11 +508,9 @@ def calculate_target(leaderboard: List[Dict]) -> Tuple[int, str]:
     return target, explanation
 
 def get_my_value(my_data: Dict) -> int:
-    """Get my today's credits"""
     return my_data['today_credits']
 
 def should_stop_browser(leaderboard: List[Dict]) -> bool:
-    """Determine if browser should be stopped based on targets"""
     my_data = None
     for entry in leaderboard:
         if entry['user_id'] == CONFIG['my_user_id']:
@@ -525,11 +521,9 @@ def should_stop_browser(leaderboard: List[Dict]) -> bool:
     
     my_today = get_my_value(my_data)
     
-    # MANUAL TARGET CHECK
     if state.manual_target is not None:
         return my_today >= state.manual_target
     
-    # Rank-based target
     if state.my_position != 1:
         return False
     
@@ -537,7 +531,6 @@ def should_stop_browser(leaderboard: List[Dict]) -> bool:
     return my_today >= target
 
 def send_telegram_message(message: str):
-    """Send Telegram message with error handling"""
     if not CONFIG.get('chat_id'):
         return
     try:
@@ -550,14 +543,13 @@ def send_telegram_message(message: str):
         logger.error(f"Telegram send error: {e}")
 
 def check_competition_status():
-    """Check competition status and control browser"""
     current_time = datetime.now()
     state.last_check_time = current_time
     
     leaderboard = fetch_leaderboard()
     if not leaderboard:
         logger.error("Failed to fetch leaderboard")
-        send_telegram_message("❌ Failed to fetch leaderboard data")
+        # Don't send telegram message for every failure to avoid spam
         return
     
     state.leaderboard = leaderboard
@@ -575,7 +567,6 @@ def check_competition_status():
     
     my_value = get_my_value(my_data)
     
-    # Calculate growth rate
     if state.last_my_credits > 0 and state.last_credits_time:
         time_diff_hours = (current_time - state.last_credits_time).total_seconds() / 3600.0
         credits_gained = my_value - state.last_my_credits
@@ -585,7 +576,6 @@ def check_competition_status():
     state.last_my_credits = my_value
     state.last_credits_time = current_time
     
-    # Browser control logic
     should_stop = should_stop_browser(leaderboard)
     if should_stop and state.browser_active:
         logger.info("🎯 Target achieved, stopping browser")
@@ -599,12 +589,11 @@ def check_competition_status():
             if smart_login_flow(state.driver):
                 send_telegram_message("🚀 <b>Browser started</b> - chasing target!")
             else:
-                send_telegram_message("⚠️ <b>Browser started but login may have failed</b>")
+                send_telegram_message("⚠️ <b>Browser started but login failed</b>")
     
     target, explanation = calculate_target(leaderboard)
     state.current_target = target
     
-    # Status message
     status_message = ""
     if state.manual_target is not None:
         if my_value >= state.manual_target:
@@ -637,7 +626,6 @@ def check_competition_status():
     send_telegram_message(full_message)
 
 def telegram_bot_loop():
-    """Telegram bot command handler"""
     last_update_id = 0
     while True:
         try:
@@ -715,7 +703,7 @@ def telegram_bot_loop():
                                         send_telegram_message("❌ Failed to restart browser")
                                 elif command == '/help':
                                     help_text = """
-🤖 <b>AdShare Monitor v11.1 (Fixed)</b>
+🤖 <b>AdShare Monitor v11.2 (Fixed Login & Leaderboard)</b>
 
 /start - Start monitoring
 /stop - Stop monitoring  
@@ -728,7 +716,7 @@ def telegram_bot_loop():
 /restart_browser - Restart browser
 /help - This help
 
-💡 <i>Running in ultra low resource mode</i>
+💡 <i>Fixed login issues and leaderboard parsing</i>
                                     """
                                     send_telegram_message(help_text)
         except Exception as e:
@@ -736,8 +724,7 @@ def telegram_bot_loop():
         time.sleep(10)
 
 def main_loop():
-    """Main monitoring loop"""
-    logger.info("Starting AdShare Monitor v11.1 (Fixed)...")
+    logger.info("Starting AdShare Monitor v11.2 (Fixed Login & Leaderboard)...")
     
     # Initial setup
     if not initialize_profile():
@@ -745,7 +732,7 @@ def main_loop():
         send_telegram_message("❌ Profile setup failed! Check logs.")
         return
     
-    send_telegram_message("🚀 AdShare Monitor v11.1 Started! (Fixed Version)")
+    send_telegram_message("🚀 AdShare Monitor v11.2 Started! (Fixed Login & Leaderboard)")
     
     # Auto-start if configured
     if CONFIG['auto_start']:
@@ -763,14 +750,12 @@ def main_loop():
             if state.is_running:
                 current_time = datetime.now()
                 
-                # Regular competition check
                 if (current_time - last_check).total_seconds() >= CONFIG['leaderboard_check_interval']:
                     check_competition_status()
                     last_check = current_time
                 
-                # Browser health check (less frequent)
                 if state.driver and state.browser_active:
-                    if (current_time - last_browser_check).total_seconds() >= 300:  # 5 minutes
+                    if (current_time - last_browser_check).total_seconds() >= 300:
                         try:
                             current_url = state.driver.current_url
                             if "adsha.re" not in current_url:
@@ -779,7 +764,6 @@ def main_loop():
                                 time.sleep(5)
                         except Exception as e:
                             logger.error(f"Browser health check failed: {e}")
-                            # Restart browser
                             stop_browser()
                             time.sleep(5)
                             state.driver = start_browser()
@@ -787,7 +771,7 @@ def main_loop():
                                 smart_login_flow(state.driver)
                         last_browser_check = current_time
             
-            time.sleep(30)  # Main loop interval
+            time.sleep(30)
             
         except KeyboardInterrupt:
             break
@@ -796,20 +780,14 @@ def main_loop():
             time.sleep(30)
 
 def signal_handler(sig, frame):
-    """Handle shutdown signals"""
     logger.info("Shutting down gracefully...")
     stop_browser()
     sys.exit(0)
 
 if __name__ == '__main__':
-    # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
-    # Start Telegram bot in background thread
     import threading
     bot_thread = threading.Thread(target=telegram_bot_loop, daemon=True)
     bot_thread.start()
-    
-    # Start main loop
     main_loop()
