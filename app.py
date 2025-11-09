@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AdShare Monitor v11.0 - Ultra Low Resource
+AdShare Monitor v11.1 - Ultra Low Resource - FIXED VERSION
 """
 
 import subprocess
@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, Tuple
 import signal
 import sys
 import urllib.request
+import json
+import tempfile
 
 try:
     import requests
@@ -52,13 +54,13 @@ CONFIG = {
     'competition_strategy': 'today_only',
     'my_user_id': '4150',
     'browser_url': "https://adsha.re/surf",
-    'login_url': "https://adsha.re/login",  # Added login URL
+    'login_url': "https://adsha.re/login",
     'leaderboard_url': 'https://adsha.re/ten',
     'timezone': 'Asia/Kolkata',
     'profile_dir': '/app/firefox_profile',
     'extensions_dir': '/app/extensions',
     'auto_start': True,
-    'manual_target': None,  # Added manual target
+    'manual_target': None,
 }
 
 EXTENSIONS = {
@@ -103,13 +105,15 @@ class MonitorState:
         self.credits_growth_rate = 0
         self.last_check_time = None
         self.profile_initialized = False
-        self.manual_target = None  # Added manual target
+        self.manual_target = None
+        self.initialization_lock = False
 
 state = MonitorState()
 
 # ==================== CORE FUNCTIONS ====================
 
 def download_files():
+    """Download extension files with retry logic"""
     os.makedirs(CONFIG['extensions_dir'], exist_ok=True)
     logger.info("Downloading extensions...")
     
@@ -117,168 +121,216 @@ def download_files():
     for ext_id, ext_info in EXTENSIONS.items():
         filepath = os.path.join(CONFIG['extensions_dir'], ext_info["xpi_file"])
         if not os.path.exists(filepath):
-            urllib.request.urlretrieve(ext_info["xpi_url"], filepath)
-            logger.info(f"Downloaded {ext_info['name']}")
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    urllib.request.urlretrieve(ext_info["xpi_url"], filepath)
+                    logger.info(f"Downloaded {ext_info['name']}")
+                    break
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"Failed to download {ext_info['name']}: {e}")
+                        raise
+                    time.sleep(2)
         paths[ext_id] = filepath
     return paths
 
-def install_userscript_properly(driver):
-    logger.info("Installing userscript...")
+def create_firefox_profile():
+    """Create and configure Firefox profile with extensions"""
+    logger.info("Creating Firefox profile...")
     
-    try:
-        main_window = driver.current_window_handle
-        initial_windows = driver.window_handles
-        
-        driver.get(USERSCRIPT_PAGE)
-        time.sleep(6)
-        
-        if "install this script" not in driver.page_source.lower():
-            logger.error("Violentmonkey not detected!")
-            return False
-        
-        logger.info("Violentmonkey detected!")
-        
-        try:
-            install_link = driver.find_element(By.CSS_SELECTOR, "a.install-link")
-            install_link.click()
-            logger.info("Clicked install link")
-        except Exception as e:
-            driver.execute_script("document.querySelector('a.install-link').click();")
-            logger.info("JS click executed")
-        
-        time.sleep(5)
-        current_windows = driver.window_handles
-        
-        if len(current_windows) > len(initial_windows):
-            logger.info("New window detected!")
-            new_window = [w for w in current_windows if w not in initial_windows][-1]
-            driver.switch_to.window(new_window)
-            time.sleep(3)
-            
-            install_selectors = [
-                (By.XPATH, "//button[contains(text(), 'Install')]"),
-                (By.XPATH, "//button[contains(@class, 'install')]"),
-                (By.CSS_SELECTOR, "button.vm-confirm"),
-                (By.XPATH, "//button[@type='submit']"),
-            ]
-            
-            for by, selector in install_selectors:
-                try:
-                    install_btn = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable((by, selector))
-                    )
-                    driver.execute_script("arguments[0].scrollIntoView(true);", install_btn)
-                    time.sleep(1)
-                    install_btn.click()
-                    logger.info(f"Clicked Install button using {selector}")
-                    time.sleep(3)
-                    break
-                except:
-                    continue
-            
-            time.sleep(2)
-            if main_window in driver.window_handles:
-                driver.switch_to.window(main_window)
-            else:
-                driver.switch_to.window(driver.window_handles[0])
-            
-            logger.info("Userscript installation completed!")
-            return True
-        else:
-            logger.error("No new window opened!")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Installation error: {e}")
-        return False
-
-def initialize_profile():
-    if state.profile_initialized:
-        return True
-        
-    logger.info("Initializing profile...")
-    
+    # Clean up existing profile
     if os.path.exists(CONFIG['profile_dir']):
         import shutil
-        shutil.rmtree(CONFIG['profile_dir'])
-    os.makedirs(CONFIG['profile_dir'])
+        try:
+            shutil.rmtree(CONFIG['profile_dir'])
+        except Exception as e:
+            logger.warning(f"Could not remove old profile: {e}")
     
+    os.makedirs(CONFIG['profile_dir'], exist_ok=True)
+    
+    # Download extensions first
     extension_paths = download_files()
     
+    # Create a minimal Firefox instance to install extensions
+    logger.info("Installing extensions to profile...")
+    
+    temp_profile = tempfile.mkdtemp()
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument(f"-profile")
-    options.add_argument(CONFIG['profile_dir'])
+    options.add_argument(temp_profile)
+    
+    # Essential preferences for extension installation
     options.set_preference("xpinstall.signatures.required", False)
     options.set_preference("extensions.autoDisableScopes", 0)
     options.set_preference("extensions.enabledScopes", 15)
+    options.set_preference("extensions.experiments.enabled", True)
+    options.set_preference("extensions.webapi.testing", True)
     
-    # ULTRA LOW MEMORY SETTINGS
-    options.set_preference("browser.tabs.remote.autostart", False)
-    options.set_preference("browser.tabs.remote.autostart.2", False)
-    options.set_preference("dom.ipc.processCount", 1)  # Single process
-    options.set_preference("dom.ipc.processCount.webIsolated", 1)
-    options.set_preference("browser.sessionstore.interval", 60000)  # Reduce session save frequency
-    options.set_preference("browser.sessionstore.max_resumed_crashes", 0)
-    options.set_preference("browser.sessionstore.restore_on_demand", False)
-    options.set_preference("browser.sessionstore.resume_from_crash", False)
-    options.set_preference("browser.startup.homepage_override.mstone", "ignore")
-    options.set_preference("toolkit.telemetry.reportingpolicy.firstRun", False)
-    options.set_preference("toolkit.telemetry.shutdownPingSender.enabled", False)
-    options.set_preference("datareporting.healthreport.uploadEnabled", False)
-    options.set_preference("dom.disable_beforeunload", True)
-    options.set_preference("dom.max_script_run_time", 30)
-    options.set_preference("dom.min_timeout_value", 1000)
-    
-    # Install extensions
-    logger.info("Installing extensions...")
     driver = None
     try:
         driver = webdriver.Firefox(options=options)
+        time.sleep(5)  # Wait for browser to initialize
+        
+        # Install extensions
         for ext_id, ext_path in extension_paths.items():
-            abs_path = os.path.abspath(ext_path)
-            driver.install_addon(abs_path, temporary=False)
-            logger.info(f"Installed {EXTENSIONS[ext_id]['name']}")
-            time.sleep(2)
+            try:
+                abs_path = os.path.abspath(ext_path)
+                driver.install_addon(abs_path, temporary=False)
+                logger.info(f"Installed {EXTENSIONS[ext_id]['name']}")
+                time.sleep(3)  # Wait for extension to initialize
+            except Exception as e:
+                logger.error(f"Failed to install {EXTENSIONS[ext_id]['name']}: {e}")
+        
+        # Close browser properly
         driver.quit()
-    except Exception as e:
-        logger.error(f"Extension install error: {e}")
-        if driver:
-            driver.quit()
-        return False
-    
-    # Install userscript
-    logger.info("Installing userscript...")
-    time.sleep(3)
-    try:
-        driver = webdriver.Firefox(options=options)
-        time.sleep(8)  # Wait for extensions to load
+        time.sleep(2)
         
-        success = install_userscript_properly(driver)
-        driver.quit()
+        # Copy the temp profile to our main profile directory
+        if os.path.exists(temp_profile):
+            for item in os.listdir(temp_profile):
+                src = os.path.join(temp_profile, item)
+                dst = os.path.join(CONFIG['profile_dir'], item)
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copy2(src, dst)
+            
+            # Clean up temp profile
+            shutil.rmtree(temp_profile)
         
-        if success:
-            state.profile_initialized = True
-            logger.info("Profile initialization complete!")
-            return True
-        return False
+        logger.info("Firefox profile created successfully!")
+        return True
         
     except Exception as e:
-        logger.error(f"Userscript install error: {e}")
+        logger.error(f"Profile creation failed: {e}")
         if driver:
-            driver.quit()
+            try:
+                driver.quit()
+            except:
+                pass
+        # Clean up on failure
+        if os.path.exists(temp_profile):
+            try:
+                shutil.rmtree(temp_profile)
+            except:
+                pass
         return False
 
-def start_browser():
-    if not state.profile_initialized:
-        if not initialize_profile():
-            return None
+def install_userscript_simple(driver):
+    """Simplified userscript installation"""
+    logger.info("Installing userscript...")
     
-    logger.info("Starting browser with low memory settings...")
+    try:
+        # Navigate to userscript page
+        driver.get(USERSCRIPT_PAGE)
+        time.sleep(10)  # Wait for page to load completely
+        
+        # Check if Violentmonkey is available
+        if "Violentmonkey" not in driver.page_source:
+            logger.warning("Violentmonkey not detected on page")
+        
+        # Try to find and click install button
+        install_selectors = [
+            "a.install-link",
+            ".install-link",
+            "a[href*='userjs']",
+            "a[href*='user.js']",
+            "a[href*='install']",
+            "button.install",
+            ".install-button"
+        ]
+        
+        for selector in install_selectors:
+            try:
+                install_btn = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                )
+                driver.execute_script("arguments[0].scrollIntoView(true);", install_btn)
+                time.sleep(1)
+                install_btn.click()
+                logger.info(f"Clicked install button: {selector}")
+                time.sleep(5)
+                break
+            except:
+                continue
+        
+        # Wait for installation to complete
+        time.sleep(10)
+        logger.info("Userscript installation attempted")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Userscript installation error: {e}")
+        return False
+
+def initialize_profile():
+    """Initialize Firefox profile with extensions and userscript"""
+    if state.profile_initialized or state.initialization_lock:
+        return True
     
+    state.initialization_lock = True
+    max_attempts = 2
+    
+    for attempt in range(max_attempts):
+        try:
+            logger.info(f"Profile initialization attempt {attempt + 1}/{max_attempts}")
+            
+            # Step 1: Create Firefox profile with extensions
+            if not create_firefox_profile():
+                logger.error("Failed to create Firefox profile")
+                continue
+            
+            # Step 2: Start browser and install userscript
+            logger.info("Starting browser for userscript installation...")
+            options = get_browser_options()
+            driver = None
+            
+            try:
+                driver = webdriver.Firefox(options=options)
+                time.sleep(10)  # Wait for extensions to load
+                
+                # Install userscript
+                if install_userscript_simple(driver):
+                    state.profile_initialized = True
+                    logger.info("✅ Profile initialization complete!")
+                    driver.quit()
+                    state.initialization_lock = False
+                    return True
+                else:
+                    logger.warning("Userscript installation failed, but continuing...")
+                    # Even if userscript fails, we can continue with extensions
+                    state.profile_initialized = True
+                    driver.quit()
+                    state.initialization_lock = False
+                    return True
+                    
+            except Exception as e:
+                logger.error(f"Browser startup failed: {e}")
+                if driver:
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                continue
+                
+        except Exception as e:
+            logger.error(f"Initialization attempt {attempt + 1} failed: {e}")
+            if attempt == max_attempts - 1:
+                logger.error("All initialization attempts failed!")
+                state.initialization_lock = False
+                return False
+            time.sleep(5)
+    
+    state.initialization_lock = False
+    return False
+
+def get_browser_options():
+    """Get browser options with ultra low memory settings"""
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--disable-gpu")
@@ -295,54 +347,103 @@ def start_browser():
     options.set_preference("browser.sessionstore.interval", 60000)
     options.set_preference("browser.sessionstore.max_resumed_crashes", 0)
     options.set_preference("dom.disable_beforeunload", True)
+    options.set_preference("javascript.options.mem.max", 256)  # 256MB max memory
+    options.set_preference("browser.cache.memory.max_entry_size", 2048)  # 2MB max cache entry
+    options.set_preference("browser.cache.memory.capacity", 65536)  # 64MB cache
+    options.set_preference("dom.min_timeout_value", 1000)
     
-    try:
-        driver = webdriver.Firefox(options=options)
-        state.browser_active = True
-        logger.info("Browser started with low memory settings!")
-        return driver
-    except Exception as e:
-        logger.error(f"Failed to start browser: {e}")
-        return None
+    # Extension preferences
+    options.set_preference("xpinstall.signatures.required", False)
+    options.set_preference("extensions.autoDisableScopes", 0)
+    options.set_preference("extensions.enabledScopes", 15)
+    
+    return options
+
+def start_browser():
+    """Start browser with the pre-configured profile"""
+    if not state.profile_initialized:
+        if not initialize_profile():
+            logger.error("Cannot start browser: profile not initialized")
+            return None
+    
+    logger.info("Starting browser with low memory settings...")
+    
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            options = get_browser_options()
+            driver = webdriver.Firefox(options=options)
+            state.browser_active = True
+            logger.info("✅ Browser started successfully!")
+            return driver
+        except Exception as e:
+            logger.error(f"Browser start attempt {attempt + 1} failed: {e}")
+            if attempt == max_attempts - 1:
+                logger.error("All browser start attempts failed!")
+                return None
+            time.sleep(5)
 
 def stop_browser():
+    """Stop browser safely"""
     if state.driver:
         try:
             state.driver.quit()
             logger.info("Browser stopped")
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error stopping browser: {e}")
         state.driver = None
     state.browser_active = False
 
 def smart_login_flow(driver):
-    """New login flow: login page first, wait 60s, then surf"""
+    """Login flow with error handling"""
     try:
         logger.info("Starting smart login flow...")
         
         # Step 1: Open login page first
         logger.info("Step 1: Opening login page...")
         driver.get(CONFIG['login_url'])
-        time.sleep(5)
+        time.sleep(8)
         
-        # Step 2: Wait 60 seconds for auto-login by userscript
-        logger.info("Step 2: Waiting 60 seconds for auto-login...")
-        for i in range(60):
+        # Step 2: Wait for auto-login by userscript
+        logger.info("Step 2: Waiting for auto-login...")
+        wait_time = 60
+        for i in range(wait_time):
             time.sleep(1)
-            if i % 10 == 0:  # Log every 10 seconds
-                logger.info(f"Auto-login wait: {i}/60 seconds")
+            if "surf" in driver.current_url or "game" in driver.current_url.lower():
+                logger.info("✅ Auto-login detected early!")
+                return True
+            if i % 10 == 0:
+                logger.info(f"Auto-login wait: {i}/{wait_time} seconds")
         
         # Step 3: Navigate to surf page
         logger.info("Step 3: Navigating to surf page...")
         driver.get(CONFIG['browser_url'])
-        time.sleep(5)
+        time.sleep(8)
         
         # Check if successfully on surf page
-        if "surf" in driver.current_url or "game" in driver.current_url.lower():
+        current_url = driver.current_url.lower()
+        if "surf" in current_url or "game" in current_url:
             logger.info("✅ Login successful! Ready to surf.")
             return True
         else:
-            logger.error("❌ Login failed - not on surf page")
+            logger.warning("Not on surf page, attempting direct navigation...")
+            # Try alternative URLs
+            alternative_urls = [
+                "https://adsha.re/surf",
+                "https://adsha.re/game",
+                "https://adsha.re/"
+            ]
+            for url in alternative_urls:
+                try:
+                    driver.get(url)
+                    time.sleep(5)
+                    if "surf" in driver.current_url or "game" in driver.current_url:
+                        logger.info(f"✅ Success with alternative URL: {url}")
+                        return True
+                except:
+                    continue
+            
+            logger.error("❌ All login attempts failed")
             return False
             
     except Exception as e:
@@ -357,23 +458,34 @@ class LeaderboardParser:
         try:
             soup = BeautifulSoup(html, 'html.parser')
             leaderboard = []
+            
+            # Multiple parsing strategies
             entries = soup.find_all('div', style=lambda x: x and 'width:250px' in x and 'margin:5px auto' in x)
             
             if not entries:
+                # Alternative: look for divs containing competition data
                 all_divs = soup.find_all('div')
-                entries = [div for div in all_divs if 'T:' in div.get_text() and 'Y:' in div.get_text()]
+                entries = [div for div in all_divs if any(x in div.get_text() for x in ['T:', 'Y:', 'DB:'])]
+            
+            if not entries:
+                # Last resort: find any div with user data
+                entries = soup.find_all('div', string=re.compile(r'#\d+'))
             
             rank = 1
             for entry in entries:
                 text = entry.get_text(strip=True)
+                
+                # Extract user ID
                 user_match = re.search(r'#(\d+)', text)
                 if not user_match:
                     continue
                 
                 user_id = user_match.group(1)
-                today_match = re.search(r'T:\s*(\d+(?:,\d+)*)', text)
-                yesterday_match = re.search(r'Y:\s*(\d+(?:,\d+)*)', text)
-                db_match = re.search(r'DB:\s*(\d+(?:,\d+)*)', text)
+                
+                # Extract credits with more flexible patterns
+                today_match = re.search(r'T:\s*([\d,]+)', text)
+                yesterday_match = re.search(r'Y:\s*([\d,]+)', text)
+                db_match = re.search(r'DB:\s*([\d,]+)', text)
                 
                 today = int(today_match.group(1).replace(',', '')) if today_match else 0
                 yesterday = int(yesterday_match.group(1).replace(',', '')) if yesterday_match else 0
@@ -381,42 +493,63 @@ class LeaderboardParser:
                 total = today + yesterday + day_before
                 
                 leaderboard.append({
-                    'rank': rank, 'user_id': user_id, 'total_surfed': total,
-                    'today_credits': today, 'yesterday_credits': yesterday, 'day_before_credits': day_before
+                    'rank': rank, 
+                    'user_id': user_id, 
+                    'total_surfed': total,
+                    'today_credits': today, 
+                    'yesterday_credits': yesterday, 
+                    'day_before_credits': day_before
                 })
                 rank += 1
             
-            logger.info(f"Parsed {len(leaderboard)} entries")
+            logger.info(f"Parsed {len(leaderboard)} leaderboard entries")
             return leaderboard
+            
         except Exception as e:
-            logger.error(f"Parse error: {e}")
+            logger.error(f"Leaderboard parse error: {e}")
             return []
 
 def fetch_leaderboard() -> Optional[List[Dict]]:
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Cookie': 'adshare_e=bonna.b.o.rre.z%40gmail.com; adshare_s=e4dc9d210bb38a86cd360253a82feb2cc6ed84f5ddf778be89484fb476998e0dfc31280c575a38a2467067cd6ec1d6ff7e25aa46dedd6ea454831df26365dfc2; adshare_d=20251025; adshare_h=https%3A%2F%2Fadsha.re%2Faffiliates'
-        }
+    """Fetch leaderboard with improved error handling"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+            
+            response = requests.post(CONFIG['leaderboard_url'], headers=headers, timeout=30)
+            if response.status_code == 200:
+                leaderboard = LeaderboardParser.parse_with_beautifulsoup(response.text)
+                if leaderboard:
+                    return leaderboard
+                else:
+                    logger.warning(f"Empty leaderboard on attempt {attempt + 1}")
+            else:
+                logger.warning(f"HTTP {response.status_code} on attempt {attempt + 1}")
+                
+        except Exception as e:
+            logger.error(f"Leaderboard fetch error (attempt {attempt + 1}): {e}")
         
-        response = requests.post(CONFIG['leaderboard_url'], headers=headers, timeout=30)
-        if response.status_code == 200:
-            leaderboard = LeaderboardParser.parse_with_beautifulsoup(response.text)
-            if leaderboard:
-                return leaderboard
-        return None
-    except Exception as e:
-        logger.error(f"Leaderboard error: {e}")
-        return None
+        if attempt < max_retries - 1:
+            time.sleep(5)
+    
+    logger.error("All leaderboard fetch attempts failed")
+    return None
 
 def calculate_target(leaderboard: List[Dict]) -> Tuple[int, str]:
-    # CHECK MANUAL TARGET FIRST - OVERRIDES ALL AUTOMATIC CALCULATIONS
+    """Calculate target with manual target support"""
+    # MANUAL TARGET OVERRIDE
     if state.manual_target is not None:
         return state.manual_target, f"MANUAL TARGET: {state.manual_target}"
     
     if len(leaderboard) < 2:
-        return 0, "Not enough data"
+        return 1000, "Default target (insufficient data)"
     
     second_place = leaderboard[1]
     if state.strategy == 'today_only':
@@ -424,14 +557,16 @@ def calculate_target(leaderboard: List[Dict]) -> Tuple[int, str]:
         explanation = f"2nd today ({second_place['today_credits']}) + {state.safety_margin}"
     else:
         second_combined = second_place['today_credits'] + second_place['yesterday_credits']
-        target = second_combined
-        explanation = f"2nd combined ({second_combined})"
+        target = second_combined + state.safety_margin
+        explanation = f"2nd combined ({second_combined}) + {state.safety_margin}"
     return target, explanation
 
 def get_my_value(my_data: Dict) -> int:
+    """Get my today's credits"""
     return my_data['today_credits']
 
 def should_stop_browser(leaderboard: List[Dict]) -> bool:
+    """Determine if browser should be stopped based on targets"""
     my_data = None
     for entry in leaderboard:
         if entry['user_id'] == CONFIG['my_user_id']:
@@ -442,11 +577,11 @@ def should_stop_browser(leaderboard: List[Dict]) -> bool:
     
     my_today = get_my_value(my_data)
     
-    # CHECK MANUAL TARGET FIRST
+    # MANUAL TARGET CHECK
     if state.manual_target is not None:
         return my_today >= state.manual_target
     
-    # Original logic for rank-based target
+    # Rank-based target
     if state.my_position != 1:
         return False
     
@@ -454,22 +589,27 @@ def should_stop_browser(leaderboard: List[Dict]) -> bool:
     return my_today >= target
 
 def send_telegram_message(message: str):
+    """Send Telegram message with error handling"""
     if not CONFIG.get('chat_id'):
         return
     try:
         url = f"https://api.telegram.org/bot{CONFIG['telegram_token']}/sendMessage"
         data = {'chat_id': CONFIG['chat_id'], 'text': message, 'parse_mode': 'HTML'}
-        requests.post(url, data=data, timeout=15)
+        response = requests.post(url, data=data, timeout=15)
+        if response.status_code != 200:
+            logger.error(f"Telegram API error: {response.text}")
     except Exception as e:
-        logger.error(f"Telegram error: {e}")
+        logger.error(f"Telegram send error: {e}")
 
 def check_competition_status():
+    """Check competition status and control browser"""
     current_time = datetime.now()
     state.last_check_time = current_time
     
     leaderboard = fetch_leaderboard()
     if not leaderboard:
         logger.error("Failed to fetch leaderboard")
+        send_telegram_message("❌ Failed to fetch leaderboard data")
         return
     
     state.leaderboard = leaderboard
@@ -481,10 +621,13 @@ def check_competition_status():
             break
     
     if not my_data:
-        logger.error(f"User #{CONFIG['my_user_id']} not found!")
+        logger.error(f"User #{CONFIG['my_user_id']} not found in leaderboard!")
+        send_telegram_message(f"❌ User #{CONFIG['my_user_id']} not found in leaderboard!")
         return
     
     my_value = get_my_value(my_data)
+    
+    # Calculate growth rate
     if state.last_my_credits > 0 and state.last_credits_time:
         time_diff_hours = (current_time - state.last_credits_time).total_seconds() / 3600.0
         credits_gained = my_value - state.last_my_credits
@@ -494,21 +637,26 @@ def check_competition_status():
     state.last_my_credits = my_value
     state.last_credits_time = current_time
     
-    # Browser control
+    # Browser control logic
     should_stop = should_stop_browser(leaderboard)
     if should_stop and state.browser_active:
-        logger.info("Target achieved, stopping browser")
+        logger.info("🎯 Target achieved, stopping browser")
         stop_browser()
         send_telegram_message("🎯 <b>TARGET ACHIEVED!</b> Browser stopped.")
-    elif not should_stop and not state.browser_active and state.is_running:
+        state.target_achieved = True
+    elif not should_stop and not state.browser_active and state.is_running and not state.target_achieved:
         logger.info("Starting browser to chase target")
         state.driver = start_browser()
         if state.driver:
-            smart_login_flow(state.driver)
+            if smart_login_flow(state.driver):
+                send_telegram_message("🚀 <b>Browser started</b> - chasing target!")
+            else:
+                send_telegram_message("⚠️ <b>Browser started but login may have failed</b>")
     
     target, explanation = calculate_target(leaderboard)
     state.current_target = target
     
+    # Status message
     status_message = ""
     if state.manual_target is not None:
         if my_value >= state.manual_target:
@@ -541,10 +689,11 @@ def check_competition_status():
     send_telegram_message(full_message)
 
 def telegram_bot_loop():
+    """Telegram bot command handler"""
     last_update_id = 0
     while True:
         try:
-            url = f"https://api.telegram.org/bot{CONFIG['telegram_token']}/getUpdates?timeout=30"
+            url = f"https://api.telegram.org/bot{CONFIG['telegram_token']}/getUpdates?timeout=30&offset={last_update_id + 1}"
             response = requests.get(url, timeout=35)
             if response.status_code == 200:
                 updates = response.json()
@@ -560,6 +709,7 @@ def telegram_bot_loop():
                                 
                                 if command == '/start':
                                     state.is_running = True
+                                    state.target_achieved = False
                                     send_telegram_message("✅ Monitor STARTED!")
                                     if not state.browser_active:
                                         state.driver = start_browser()
@@ -574,17 +724,20 @@ def telegram_bot_loop():
                                     check_competition_status()
                                 elif command == '/strategy_today':
                                     state.strategy = 'today_only'
-                                    state.manual_target = None  # Clear manual target when switching strategy
+                                    state.manual_target = None
+                                    state.target_achieved = False
                                     send_telegram_message("🎯 Strategy: TODAY ONLY")
                                     check_competition_status()
                                 elif command == '/strategy_combined':
                                     state.strategy = 'combined'
-                                    state.manual_target = None  # Clear manual target when switching strategy
+                                    state.manual_target = None
+                                    state.target_achieved = False
                                     send_telegram_message("🎯 Strategy: COMBINED")
                                     check_competition_status()
                                 elif command.startswith('/margin '):
                                     try:
                                         state.safety_margin = int(command.split()[1])
+                                        state.target_achieved = False
                                         send_telegram_message(f"🛡️ Margin: {state.safety_margin}")
                                         check_competition_status()
                                     except:
@@ -593,17 +746,28 @@ def telegram_bot_loop():
                                     try:
                                         target_value = int(command.split()[1])
                                         state.manual_target = target_value
+                                        state.target_achieved = False
                                         send_telegram_message(f"🎯 MANUAL TARGET SET: {target_value}\n\nNow ignoring competitors and focusing only on reaching {target_value} credits today!")
                                         check_competition_status()
                                     except:
                                         send_telegram_message("❌ Usage: /target <number>")
                                 elif command == '/target_clear':
                                     state.manual_target = None
+                                    state.target_achieved = False
                                     send_telegram_message("🔄 Manual target cleared! Returning to automatic competition mode.")
                                     check_competition_status()
+                                elif command == '/restart_browser':
+                                    stop_browser()
+                                    time.sleep(2)
+                                    state.driver = start_browser()
+                                    if state.driver:
+                                        smart_login_flow(state.driver)
+                                        send_telegram_message("🔁 Browser RESTARTED!")
+                                    else:
+                                        send_telegram_message("❌ Failed to restart browser")
                                 elif command == '/help':
                                     help_text = """
-🤖 <b>AdShare Monitor (Low Resource)</b>
+🤖 <b>AdShare Monitor v11.1 (Fixed)</b>
 
 /start - Start monitoring
 /stop - Stop monitoring  
@@ -613,25 +777,29 @@ def telegram_bot_loop():
 /margin <number> - Set safety margin
 /target <number> - Set manual target (overrides auto)
 /target_clear - Clear manual target
+/restart_browser - Restart browser
 /help - This help
 
-💡 <i>Running in low resource mode</i>
+💡 <i>Running in ultra low resource mode</i>
                                     """
                                     send_telegram_message(help_text)
         except Exception as e:
-            logger.error(f"Telegram error: {e}")
+            logger.error(f"Telegram bot error: {e}")
         time.sleep(10)
 
 def main_loop():
-    logger.info("Starting AdShare Monitor (Low Resource Mode)...")
+    """Main monitoring loop"""
+    logger.info("Starting AdShare Monitor v11.1 (Fixed Ultra Low Resource Mode)...")
     
+    # Initial setup
     if not initialize_profile():
-        logger.error("Profile init failed!")
-        send_telegram_message("❌ Profile setup failed!")
+        logger.error("Profile initialization failed!")
+        send_telegram_message("❌ Profile setup failed! Check logs.")
         return
     
-    send_telegram_message("🚀 AdShare Monitor Started! (Low Resource Mode)")
+    send_telegram_message("🚀 AdShare Monitor v11.1 Started! (Fixed Ultra Low Resource Mode)")
     
+    # Auto-start if configured
     if CONFIG['auto_start']:
         state.is_running = True
         state.driver = start_browser()
@@ -640,29 +808,39 @@ def main_loop():
         check_competition_status()
     
     last_check = datetime.now()
+    last_browser_check = datetime.now()
+    
     while True:
         try:
             if state.is_running:
                 current_time = datetime.now()
+                
+                # Regular competition check
                 if (current_time - last_check).total_seconds() >= CONFIG['leaderboard_check_interval']:
                     check_competition_status()
                     last_check = current_time
                 
+                # Browser health check (less frequent)
                 if state.driver and state.browser_active:
-                    try:
-                        current_url = state.driver.current_url
-                        if "adsha.re" not in current_url:
-                            state.driver.get(CONFIG['browser_url'])
-                            time.sleep(5)
-                    except:
+                    if (current_time - last_browser_check).total_seconds() >= 300:  # 5 minutes
                         try:
-                            state.driver.quit()
-                        except:
-                            pass
-                        state.driver = start_browser()
-                        if state.driver:
-                            smart_login_flow(state.driver)
-            time.sleep(30)
+                            current_url = state.driver.current_url
+                            if "adsha.re" not in current_url:
+                                logger.warning("Browser not on AdShare, redirecting...")
+                                state.driver.get(CONFIG['browser_url'])
+                                time.sleep(5)
+                        except Exception as e:
+                            logger.error(f"Browser health check failed: {e}")
+                            # Restart browser
+                            stop_browser()
+                            time.sleep(5)
+                            state.driver = start_browser()
+                            if state.driver:
+                                smart_login_flow(state.driver)
+                        last_browser_check = current_time
+            
+            time.sleep(30)  # Main loop interval
+            
         except KeyboardInterrupt:
             break
         except Exception as e:
@@ -670,14 +848,20 @@ def main_loop():
             time.sleep(30)
 
 def signal_handler(sig, frame):
-    logger.info("Shutting down...")
+    """Handle shutdown signals"""
+    logger.info("Shutting down gracefully...")
     stop_browser()
     sys.exit(0)
 
 if __name__ == '__main__':
+    # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Start Telegram bot in background thread
     import threading
     bot_thread = threading.Thread(target=telegram_bot_loop, daemon=True)
     bot_thread.start()
+    
+    # Start main loop
     main_loop()
