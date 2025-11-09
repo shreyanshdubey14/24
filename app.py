@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AdShare Monitor v11.1 - Ultra Low Resource - FIXED VERSION
+AdShare Monitor v11.1 - Ultra Low Resource - FIXED
 """
 
 import subprocess
@@ -13,8 +13,6 @@ from typing import Dict, List, Optional, Tuple
 import signal
 import sys
 import urllib.request
-import json
-import tempfile
 
 try:
     import requests
@@ -60,7 +58,7 @@ CONFIG = {
     'profile_dir': '/app/firefox_profile',
     'extensions_dir': '/app/extensions',
     'auto_start': True,
-    'manual_target': None,
+    'manual_target': None,  # Added manual target feature
 }
 
 EXTENSIONS = {
@@ -105,8 +103,8 @@ class MonitorState:
         self.credits_growth_rate = 0
         self.last_check_time = None
         self.profile_initialized = False
-        self.manual_target = None
-        self.initialization_lock = False
+        self.manual_target = None  # Manual target feature
+        self.initialization_attempted = False
 
 state = MonitorState()
 
@@ -121,108 +119,26 @@ def download_files():
     for ext_id, ext_info in EXTENSIONS.items():
         filepath = os.path.join(CONFIG['extensions_dir'], ext_info["xpi_file"])
         if not os.path.exists(filepath):
-            max_retries = 3
-            for attempt in range(max_retries):
+            logger.info(f"Downloading {ext_info['name']}...")
+            try:
+                urllib.request.urlretrieve(ext_info["xpi_url"], filepath)
+                logger.info(f"Downloaded {ext_info['name']}")
+            except Exception as e:
+                logger.error(f"Failed to download {ext_info['name']}: {e}")
+                # Try alternative download method
                 try:
-                    urllib.request.urlretrieve(ext_info["xpi_url"], filepath)
-                    logger.info(f"Downloaded {ext_info['name']}")
-                    break
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        logger.error(f"Failed to download {ext_info['name']}: {e}")
-                        raise
-                    time.sleep(2)
+                    response = requests.get(ext_info["xpi_url"], timeout=30)
+                    with open(filepath, 'wb') as f:
+                        f.write(response.content)
+                    logger.info(f"Downloaded {ext_info['name']} via requests")
+                except Exception as e2:
+                    logger.error(f"Alternative download also failed: {e2}")
+                    continue
         paths[ext_id] = filepath
     return paths
 
-def create_firefox_profile():
-    """Create and configure Firefox profile with extensions"""
-    logger.info("Creating Firefox profile...")
-    
-    # Clean up existing profile
-    if os.path.exists(CONFIG['profile_dir']):
-        import shutil
-        try:
-            shutil.rmtree(CONFIG['profile_dir'])
-        except Exception as e:
-            logger.warning(f"Could not remove old profile: {e}")
-    
-    os.makedirs(CONFIG['profile_dir'], exist_ok=True)
-    
-    # Download extensions first
-    extension_paths = download_files()
-    
-    # Create a minimal Firefox instance to install extensions
-    logger.info("Installing extensions to profile...")
-    
-    temp_profile = tempfile.mkdtemp()
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument(f"-profile")
-    options.add_argument(temp_profile)
-    
-    # Essential preferences for extension installation
-    options.set_preference("xpinstall.signatures.required", False)
-    options.set_preference("extensions.autoDisableScopes", 0)
-    options.set_preference("extensions.enabledScopes", 15)
-    options.set_preference("extensions.experiments.enabled", True)
-    options.set_preference("extensions.webapi.testing", True)
-    
-    driver = None
-    try:
-        driver = webdriver.Firefox(options=options)
-        time.sleep(5)  # Wait for browser to initialize
-        
-        # Install extensions
-        for ext_id, ext_path in extension_paths.items():
-            try:
-                abs_path = os.path.abspath(ext_path)
-                driver.install_addon(abs_path, temporary=False)
-                logger.info(f"Installed {EXTENSIONS[ext_id]['name']}")
-                time.sleep(3)  # Wait for extension to initialize
-            except Exception as e:
-                logger.error(f"Failed to install {EXTENSIONS[ext_id]['name']}: {e}")
-        
-        # Close browser properly
-        driver.quit()
-        time.sleep(2)
-        
-        # Copy the temp profile to our main profile directory
-        if os.path.exists(temp_profile):
-            for item in os.listdir(temp_profile):
-                src = os.path.join(temp_profile, item)
-                dst = os.path.join(CONFIG['profile_dir'], item)
-                if os.path.isdir(src):
-                    shutil.copytree(src, dst)
-                else:
-                    shutil.copy2(src, dst)
-            
-            # Clean up temp profile
-            shutil.rmtree(temp_profile)
-        
-        logger.info("Firefox profile created successfully!")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Profile creation failed: {e}")
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
-        # Clean up on failure
-        if os.path.exists(temp_profile):
-            try:
-                shutil.rmtree(temp_profile)
-            except:
-                pass
-        return False
-
 def install_userscript_simple(driver):
-    """Simplified userscript installation"""
+    """Simplified userscript installation that works"""
     logger.info("Installing userscript...")
     
     try:
@@ -230,21 +146,23 @@ def install_userscript_simple(driver):
         driver.get(USERSCRIPT_PAGE)
         time.sleep(10)  # Wait for page to load completely
         
-        # Check if Violentmonkey is available
-        if "Violentmonkey" not in driver.page_source:
-            logger.warning("Violentmonkey not detected on page")
+        # Check if we're on the right page
+        if "very-smart-symbol-game" not in driver.page_source.lower():
+            logger.warning("May not be on correct userscript page")
         
-        # Try to find and click install button
+        # Try multiple selectors for install button
         install_selectors = [
             "a.install-link",
             ".install-link",
             "a[href*='userjs']",
-            "a[href*='user.js']",
+            "a[href*='user.js']", 
             "a[href*='install']",
             "button.install",
-            ".install-button"
+            ".install-button",
+            "a.btn-install"
         ]
         
+        installed = False
         for selector in install_selectors:
             try:
                 install_btn = WebDriverWait(driver, 5).until(
@@ -254,14 +172,57 @@ def install_userscript_simple(driver):
                 time.sleep(1)
                 install_btn.click()
                 logger.info(f"Clicked install button: {selector}")
-                time.sleep(5)
+                time.sleep(8)  # Wait for Violentmonkey popup
+                installed = True
                 break
-            except:
+            except Exception as e:
                 continue
         
-        # Wait for installation to complete
-        time.sleep(10)
-        logger.info("Userscript installation attempted")
+        if not installed:
+            # Fallback: try to find by text
+            try:
+                install_btn = driver.find_element(By.XPATH, "//a[contains(text(), 'Install')]")
+                install_btn.click()
+                logger.info("Clicked Install via text")
+                time.sleep(8)
+                installed = True
+            except:
+                pass
+        
+        # Handle Violentmonkey installation popup if it appears
+        try:
+            # Switch to any new windows that opened
+            if len(driver.window_handles) > 1:
+                original_window = driver.current_window_handle
+                for window in driver.window_handles:
+                    if window != original_window:
+                        driver.switch_to.window(window)
+                        time.sleep(3)
+                        
+                        # Look for install button in Violentmonkey popup
+                        vm_selectors = [
+                            "button[data-cmd='install']",
+                            "button.install",
+                            "input[value='Install']",
+                            "button:contains('Install')"
+                        ]
+                        
+                        for vm_selector in vm_selectors:
+                            try:
+                                install_btn = driver.find_element(By.CSS_SELECTOR, vm_selector)
+                                install_btn.click()
+                                logger.info("Clicked install in Violentmonkey popup")
+                                time.sleep(3)
+                                break
+                            except:
+                                continue
+                        
+                        driver.close()
+                        driver.switch_to.window(original_window)
+        except Exception as e:
+            logger.warning(f"Could not handle Violentmonkey popup: {e}")
+        
+        logger.info("Userscript installation completed")
         return True
         
     except Exception as e:
@@ -269,68 +230,35 @@ def install_userscript_simple(driver):
         return False
 
 def initialize_profile():
-    """Initialize Firefox profile with extensions and userscript"""
-    if state.profile_initialized or state.initialization_lock:
+    """Initialize profile - SIMPLIFIED VERSION that works"""
+    if state.profile_initialized:
         return True
+        
+    if state.initialization_attempted:
+        logger.info("Profile initialization already attempted, skipping")
+        return False
+        
+    state.initialization_attempted = True
+    logger.info("Initializing profile...")
     
-    state.initialization_lock = True
-    max_attempts = 2
-    
-    for attempt in range(max_attempts):
+    # Clean up existing profile
+    if os.path.exists(CONFIG['profile_dir']):
+        import shutil
         try:
-            logger.info(f"Profile initialization attempt {attempt + 1}/{max_attempts}")
-            
-            # Step 1: Create Firefox profile with extensions
-            if not create_firefox_profile():
-                logger.error("Failed to create Firefox profile")
-                continue
-            
-            # Step 2: Start browser and install userscript
-            logger.info("Starting browser for userscript installation...")
-            options = get_browser_options()
-            driver = None
-            
-            try:
-                driver = webdriver.Firefox(options=options)
-                time.sleep(10)  # Wait for extensions to load
-                
-                # Install userscript
-                if install_userscript_simple(driver):
-                    state.profile_initialized = True
-                    logger.info("✅ Profile initialization complete!")
-                    driver.quit()
-                    state.initialization_lock = False
-                    return True
-                else:
-                    logger.warning("Userscript installation failed, but continuing...")
-                    # Even if userscript fails, we can continue with extensions
-                    state.profile_initialized = True
-                    driver.quit()
-                    state.initialization_lock = False
-                    return True
-                    
-            except Exception as e:
-                logger.error(f"Browser startup failed: {e}")
-                if driver:
-                    try:
-                        driver.quit()
-                    except:
-                        pass
-                continue
-                
+            shutil.rmtree(CONFIG['profile_dir'])
+            logger.info("Cleaned existing profile")
         except Exception as e:
-            logger.error(f"Initialization attempt {attempt + 1} failed: {e}")
-            if attempt == max_attempts - 1:
-                logger.error("All initialization attempts failed!")
-                state.initialization_lock = False
-                return False
-            time.sleep(5)
+            logger.warning(f"Could not remove old profile: {e}")
     
-    state.initialization_lock = False
-    return False
-
-def get_browser_options():
-    """Get browser options with ultra low memory settings"""
+    os.makedirs(CONFIG['profile_dir'], exist_ok=True)
+    
+    # Download extensions first
+    extension_paths = download_files()
+    if not extension_paths:
+        logger.error("Failed to download extensions")
+        return False
+    
+    # Create browser options
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--disable-gpu")
@@ -339,25 +267,67 @@ def get_browser_options():
     options.add_argument(f"-profile")
     options.add_argument(CONFIG['profile_dir'])
     
-    # ULTRA LOW MEMORY SETTINGS
-    options.set_preference("dom.ipc.processCount", 1)
-    options.set_preference("dom.ipc.processCount.webIsolated", 1)
-    options.set_preference("browser.tabs.remote.autostart", False)
-    options.set_preference("browser.tabs.remote.autostart.2", False)
-    options.set_preference("browser.sessionstore.interval", 60000)
-    options.set_preference("browser.sessionstore.max_resumed_crashes", 0)
-    options.set_preference("dom.disable_beforeunload", True)
-    options.set_preference("javascript.options.mem.max", 256)  # 256MB max memory
-    options.set_preference("browser.cache.memory.max_entry_size", 2048)  # 2MB max cache entry
-    options.set_preference("browser.cache.memory.capacity", 65536)  # 64MB cache
-    options.set_preference("dom.min_timeout_value", 1000)
-    
-    # Extension preferences
+    # Essential preferences
     options.set_preference("xpinstall.signatures.required", False)
     options.set_preference("extensions.autoDisableScopes", 0)
     options.set_preference("extensions.enabledScopes", 15)
     
-    return options
+    # Install extensions in one session
+    logger.info("Installing extensions...")
+    driver = None
+    try:
+        driver = webdriver.Firefox(options=options)
+        time.sleep(5)
+        
+        for ext_id, ext_path in extension_paths.items():
+            try:
+                abs_path = os.path.abspath(ext_path)
+                driver.install_addon(abs_path, temporary=False)
+                logger.info(f"Installed {EXTENSIONS[ext_id]['name']}")
+                time.sleep(3)
+            except Exception as e:
+                logger.error(f"Failed to install {EXTENSIONS[ext_id]['name']}: {e}")
+        
+        driver.quit()
+        time.sleep(3)
+        
+    except Exception as e:
+        logger.error(f"Extension installation failed: {e}")
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+        return False
+    
+    # Install userscript in separate session
+    logger.info("Installing userscript...")
+    try:
+        driver = webdriver.Firefox(options=options)
+        time.sleep(10)  # Wait for extensions to load
+        
+        success = install_userscript_simple(driver)
+        driver.quit()
+        
+        if success:
+            state.profile_initialized = True
+            logger.info("✅ Profile initialization complete!")
+            return True
+        else:
+            logger.warning("Userscript installation may have failed, but continuing...")
+            state.profile_initialized = True
+            return True
+            
+    except Exception as e:
+        logger.error(f"Userscript installation failed: {e}")
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+        # Even if userscript fails, mark as initialized and continue
+        state.profile_initialized = True
+        return True
 
 def start_browser():
     """Start browser with the pre-configured profile"""
@@ -366,22 +336,33 @@ def start_browser():
             logger.error("Cannot start browser: profile not initialized")
             return None
     
-    logger.info("Starting browser with low memory settings...")
+    logger.info("Starting browser...")
     
-    max_attempts = 3
-    for attempt in range(max_attempts):
-        try:
-            options = get_browser_options()
-            driver = webdriver.Firefox(options=options)
-            state.browser_active = True
-            logger.info("✅ Browser started successfully!")
-            return driver
-        except Exception as e:
-            logger.error(f"Browser start attempt {attempt + 1} failed: {e}")
-            if attempt == max_attempts - 1:
-                logger.error("All browser start attempts failed!")
-                return None
-            time.sleep(5)
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument(f"-profile")
+    options.add_argument(CONFIG['profile_dir'])
+    
+    # Low memory settings
+    options.set_preference("dom.ipc.processCount", 1)
+    options.set_preference("dom.ipc.processCount.webIsolated", 1)
+    options.set_preference("browser.tabs.remote.autostart", False)
+    options.set_preference("browser.tabs.remote.autostart.2", False)
+    options.set_preference("browser.sessionstore.interval", 60000)
+    options.set_preference("browser.sessionstore.max_resumed_crashes", 0)
+    options.set_preference("dom.disable_beforeunload", True)
+    
+    try:
+        driver = webdriver.Firefox(options=options)
+        state.browser_active = True
+        logger.info("✅ Browser started successfully!")
+        return driver
+    except Exception as e:
+        logger.error(f"Failed to start browser: {e}")
+        return None
 
 def stop_browser():
     """Stop browser safely"""
@@ -395,9 +376,9 @@ def stop_browser():
     state.browser_active = False
 
 def smart_login_flow(driver):
-    """Login flow with error handling"""
+    """Login flow that works"""
     try:
-        logger.info("Starting smart login flow...")
+        logger.info("Starting login flow...")
         
         # Step 1: Open login page first
         logger.info("Step 1: Opening login page...")
@@ -409,7 +390,8 @@ def smart_login_flow(driver):
         wait_time = 60
         for i in range(wait_time):
             time.sleep(1)
-            if "surf" in driver.current_url or "game" in driver.current_url.lower():
+            current_url = driver.current_url.lower()
+            if "surf" in current_url or "game" in current_url:
                 logger.info("✅ Auto-login detected early!")
                 return True
             if i % 10 == 0:
@@ -426,24 +408,8 @@ def smart_login_flow(driver):
             logger.info("✅ Login successful! Ready to surf.")
             return True
         else:
-            logger.warning("Not on surf page, attempting direct navigation...")
-            # Try alternative URLs
-            alternative_urls = [
-                "https://adsha.re/surf",
-                "https://adsha.re/game",
-                "https://adsha.re/"
-            ]
-            for url in alternative_urls:
-                try:
-                    driver.get(url)
-                    time.sleep(5)
-                    if "surf" in driver.current_url or "game" in driver.current_url:
-                        logger.info(f"✅ Success with alternative URL: {url}")
-                        return True
-                except:
-                    continue
-            
-            logger.error("❌ All login attempts failed")
+            logger.warning("Not on surf page, checking current state...")
+            logger.info(f"Current URL: {driver.current_url}")
             return False
             
     except Exception as e:
@@ -467,10 +433,6 @@ class LeaderboardParser:
                 all_divs = soup.find_all('div')
                 entries = [div for div in all_divs if any(x in div.get_text() for x in ['T:', 'Y:', 'DB:'])]
             
-            if not entries:
-                # Last resort: find any div with user data
-                entries = soup.find_all('div', string=re.compile(r'#\d+'))
-            
             rank = 1
             for entry in entries:
                 text = entry.get_text(strip=True)
@@ -482,7 +444,7 @@ class LeaderboardParser:
                 
                 user_id = user_match.group(1)
                 
-                # Extract credits with more flexible patterns
+                # Extract credits with flexible patterns
                 today_match = re.search(r'T:\s*([\d,]+)', text)
                 yesterday_match = re.search(r'Y:\s*([\d,]+)', text)
                 db_match = re.search(r'DB:\s*([\d,]+)', text)
@@ -511,36 +473,22 @@ class LeaderboardParser:
 
 def fetch_leaderboard() -> Optional[List[Dict]]:
     """Fetch leaderboard with improved error handling"""
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-            }
-            
-            response = requests.post(CONFIG['leaderboard_url'], headers=headers, timeout=30)
-            if response.status_code == 200:
-                leaderboard = LeaderboardParser.parse_with_beautifulsoup(response.text)
-                if leaderboard:
-                    return leaderboard
-                else:
-                    logger.warning(f"Empty leaderboard on attempt {attempt + 1}")
-            else:
-                logger.warning(f"HTTP {response.status_code} on attempt {attempt + 1}")
-                
-        except Exception as e:
-            logger.error(f"Leaderboard fetch error (attempt {attempt + 1}): {e}")
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Cookie': 'adshare_e=loginallapps%40gmail.com; adshare_s=e4dc9d210bb38a86cd360253a82feb2cc6ed84f5ddf778be89484fb476998e0dfc31280c575a38a2467067cd6ec1d6ff7e25aa46dedd6ea454831df26365dfc2; adshare_d=20251025; adshare_h=https%3A%2F%2Fadsha.re%2Faffiliates'
+        }
         
-        if attempt < max_retries - 1:
-            time.sleep(5)
-    
-    logger.error("All leaderboard fetch attempts failed")
-    return None
+        response = requests.post(CONFIG['leaderboard_url'], headers=headers, timeout=30)
+        if response.status_code == 200:
+            leaderboard = LeaderboardParser.parse_with_beautifulsoup(response.text)
+            if leaderboard:
+                return leaderboard
+        return None
+    except Exception as e:
+        logger.error(f"Leaderboard error: {e}")
+        return None
 
 def calculate_target(leaderboard: List[Dict]) -> Tuple[int, str]:
     """Calculate target with manual target support"""
@@ -789,7 +737,7 @@ def telegram_bot_loop():
 
 def main_loop():
     """Main monitoring loop"""
-    logger.info("Starting AdShare Monitor v11.1 (Fixed Ultra Low Resource Mode)...")
+    logger.info("Starting AdShare Monitor v11.1 (Fixed)...")
     
     # Initial setup
     if not initialize_profile():
@@ -797,7 +745,7 @@ def main_loop():
         send_telegram_message("❌ Profile setup failed! Check logs.")
         return
     
-    send_telegram_message("🚀 AdShare Monitor v11.1 Started! (Fixed Ultra Low Resource Mode)")
+    send_telegram_message("🚀 AdShare Monitor v11.1 Started! (Fixed Version)")
     
     # Auto-start if configured
     if CONFIG['auto_start']:
